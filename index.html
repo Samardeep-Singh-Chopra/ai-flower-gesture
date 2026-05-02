@@ -1,0 +1,1079 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Gesture Flowers</title>
+  <style>
+    * { box-sizing: border-box; }
+
+    html, body {
+      width: 100%; height: 100%;
+      margin: 0; overflow: hidden;
+      background: #0a0604;
+      font-family: "DM Sans", ui-sans-serif, system-ui, sans-serif;
+    }
+
+    /* ── LAYER 0: Fullscreen mirrored camera background ── */
+    #cameraVideo {
+      position: fixed;
+      inset: 0;
+      width: 100vw;
+      height: 100vh;
+      object-fit: cover;
+      transform: scaleX(-1);
+      z-index: 0;
+      opacity: 0.82;
+    }
+
+    /* ── LAYER 1: Flower canvas (transparent — camera shows through) ── */
+    #flowerCanvas {
+      position: fixed;
+      inset: 0;
+      display: block;
+      width: 100vw;
+      height: 100vh;
+      z-index: 1;
+      pointer-events: none;
+      filter: saturate(1.08);
+    }
+
+    /* ── LAYER 2: HUD (top-left debug box only) ── */
+    .hud {
+      position: fixed;
+      left: 16px; top: 16px;
+      z-index: 5;
+      display: grid;
+      gap: 9px;
+      width: min(252px, calc(100vw - 32px));
+      padding: 13px;
+      border: 1px solid rgba(255, 245, 225, 0.13);
+      border-radius: 12px;
+      background: rgba(8, 5, 3, 0.78);
+      box-shadow: 0 20px 60px rgba(0,0,0,0.55);
+      backdrop-filter: blur(20px) saturate(1.4);
+      color: #fff5e1;
+    }
+
+    .hud-title {
+      margin: 0;
+      font-size: 12.5px;
+      font-weight: 700;
+      letter-spacing: 0.03em;
+      color: rgba(255,245,225,0.90);
+    }
+
+    .debug-grid {
+      display: grid;
+      grid-template-columns: 76px 1fr;
+      gap: 4px 10px;
+      color: rgba(255, 245, 225, 0.55);
+      font-size: 10.5px;
+      line-height: 1.4;
+    }
+    .debug-grid strong {
+      color: #fff5e1;
+      font-weight: 700;
+    }
+
+    /* Flower type switcher */
+    .type-row {
+      display: flex;
+      gap: 5px;
+    }
+    .type-btn {
+      flex: 1;
+      height: 24px;
+      border: 1px solid rgba(255,245,225,0.16);
+      border-radius: 6px;
+      color: rgba(255,245,225,0.52);
+      background: rgba(255,255,255,0.04);
+      font: 600 10px/1 "DM Sans", sans-serif;
+      cursor: pointer;
+      transition: all 0.18s ease;
+      letter-spacing: 0.02em;
+    }
+    .type-btn:hover { color: rgba(255,245,225,0.85); background: rgba(255,255,255,0.09); }
+    .type-btn.active {
+      color: #0a0604;
+      font-weight: 800;
+      border-color: transparent;
+    }
+    .type-btn[data-type="default"].active { background: linear-gradient(135deg, #ffd166, #f4a261); }
+    .type-btn[data-type="rose"].active    { background: linear-gradient(135deg, #ff4d6d, #ff8fa3); }
+    .type-btn[data-type="sunflower"].active { background: linear-gradient(135deg, #ffe234, #ffb830); }
+
+    /* Camera row */
+    .cam-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    #cameraStatus {
+      flex: 1;
+      font-size: 10px;
+      color: rgba(255,245,225,0.45);
+    }
+    #startCamera {
+      height: 24px;
+      border: 1px solid rgba(255,245,225,0.2);
+      border-radius: 6px;
+      padding: 0 10px;
+      color: #fff5e1;
+      background: linear-gradient(135deg, rgba(255,143,163,0.85), rgba(255,209,102,0.8));
+      font: 700 10px/1 "DM Sans", sans-serif;
+      cursor: pointer;
+      letter-spacing: 0.04em;
+      transition: opacity 0.15s;
+    }
+    #startCamera:disabled { opacity: 0.55; cursor: default; }
+
+    /* Hint badge */
+    .hint {
+      font-size: 9.5px;
+      color: rgba(255,245,225,0.32);
+      letter-spacing: 0.03em;
+    }
+
+    @media (max-width: 480px) {
+      .hud { left: 10px; top: 10px; width: calc(100vw - 20px); }
+    }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+</head>
+<body>
+
+  <!-- LAYER 0 ─ Fullscreen mirrored camera -->
+  <video id="cameraVideo" playsinline muted></video>
+
+  <!-- LAYER 1 ─ Flower canvas -->
+  <canvas id="flowerCanvas"></canvas>
+
+  <!-- LAYER 2 ─ HUD -->
+  <section class="hud" aria-live="polite">
+    <h1 class="hud-title">🌸 Gesture Flowers</h1>
+
+    <div class="debug-grid">
+      <span>Left pinch</span> <strong id="leftDistance">--</strong>
+      <span>Stems</span>      <strong id="leftStems">1</strong>
+      <span>Right pinch</span><strong id="rightDistance">--</strong>
+      <span>Bloom</span>      <strong id="rightBloom">0.20</strong>
+      <span>Status</span>    <strong id="trackingStatus">Camera idle</strong>
+    </div>
+
+    <div class="type-row">
+      <button class="type-btn active" data-type="default">Default</button>
+      <button class="type-btn"        data-type="rose">🌹 Rose</button>
+      <button class="type-btn"        data-type="sunflower">🌻 Sun</button>
+    </div>
+
+    <div class="cam-row">
+      <span id="cameraStatus">Start on localhost</span>
+      <button id="startCamera" type="button">START</button>
+    </div>
+
+    <p class="hint">Keys: D / R / S to switch type</p>
+  </section>
+
+  <script>
+    // ═══════════════════════════════════════════════════════════════════════
+    //  ELEMENT REFS
+    // ═══════════════════════════════════════════════════════════════════════
+    const flowerCanvas      = document.querySelector("#flowerCanvas");
+    const flowerCtx         = flowerCanvas.getContext("2d");
+    const video             = document.querySelector("#cameraVideo");
+    const startBtn          = document.querySelector("#startCamera");
+    const cameraStatus      = document.querySelector("#cameraStatus");
+    const trackingStatus    = document.querySelector("#trackingStatus");
+    const leftDistanceText  = document.querySelector("#leftDistance");
+    const leftStemsText     = document.querySelector("#leftStems");
+    const rightDistanceText = document.querySelector("#rightDistance");
+    const rightBloomText    = document.querySelector("#rightBloom");
+    const typeBtns          = document.querySelectorAll(".type-btn");
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  CONSTANTS
+    // ═══════════════════════════════════════════════════════════════════════
+    const TAU              = Math.PI * 2;
+    const MAX_STEMS        = 6;
+    const PINCH_MIN        = 0.025;
+    const PINCH_MAX        = 0.23;
+    const HAND_LOSS_AFTER_MS = 260;
+    const MEDIAPIPE_URL    = "https://cdn.jsdelivr.net/npm/@mediapipe/hands";
+
+    // Original hand connection graph (unchanged)
+    const handConnections = [
+      [0,1],[1,2],[2,3],[3,4],
+      [0,5],[5,6],[6,7],[7,8],
+      [5,9],[9,10],[10,11],[11,12],
+      [9,13],[13,14],[14,15],[15,16],
+      [13,17],[17,18],[18,19],[19,20],
+      [0,17],
+    ];
+
+    // Default palette — original warm tones
+    const defaultPalette = [
+      { inner:"#FFF5E1", mid:"#FFD166", outer:"#F4A261", glow:"rgba(255,213,126,0.78)" },
+      { inner:"#FFF5E1", mid:"#FF8FA3", outer:"#F4A261", glow:"rgba(255,143,163,0.72)" },
+      { inner:"#FFF5E1", mid:"#F4A261", outer:"#FF8FA3", glow:"rgba(244,162,97,0.70)"  },
+    ];
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  STATE
+    // ═══════════════════════════════════════════════════════════════════════
+    const processingCanvas = document.createElement("canvas");
+    const processingCtx    = processingCanvas.getContext("2d", { willReadFrequently: true });
+    const flowers          = createFlowerModels();
+    const particles        = [];
+    const handsState = {
+      Left:  createHandState(1,   1  ),
+      Right: createHandState(0.2, 0.2),
+    };
+
+    let flowerType       = "default";   // "default" | "rose" | "sunflower"
+    let hands            = null;
+    let isCameraRunning  = false;
+    let isSendingFrame   = false;
+    let flowerDpr        = 1;
+    let width            = 0;
+    let height           = 0;
+    let displayedStemCount = 1;
+    let displayedBloom     = 0.2;
+    let cameraZoom         = 1;
+    let lastParticleBloom  = 0.2;
+    let lastHandResults    = null;      // for visual skeleton overlay
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  PURE HELPERS (all original, unchanged)
+    // ═══════════════════════════════════════════════════════════════════════
+    function lerp(a, b, t)         { return a + (b - a) * t; }
+    function clamp(v, lo, hi)      { return Math.min(Math.max(v, lo), hi); }
+    function easeOutCubic(v)       { return 1 - (1 - v) ** 3; }
+    function randomBetween(lo, hi) { return lo + Math.random() * (hi - lo); }
+    function mapRange(v, iLo, iHi, oLo, oHi) {
+      return oLo + (v - iLo) / (iHi - iLo) * (oHi - oLo);
+    }
+    function hexToRgba(hex, alpha) {
+      const h = hex.replace("#","");
+      return `rgba(${parseInt(h.slice(0,2),16)},${parseInt(h.slice(2,4),16)},${parseInt(h.slice(4,6),16)},${alpha})`;
+    }
+
+    // Particle color based on active flower type
+    function particleColor(variant) {
+      if (flowerType === "rose")
+        return variant ? "255,77,109" : "255,143,163";
+      if (flowerType === "sunflower")
+        return variant ? "255,209,102" : "255,228,50";
+      return variant ? "255,209,102" : "255,245,225";
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  MODELS  (original, unchanged)
+    // ═══════════════════════════════════════════════════════════════════════
+    function createHandState(defaultTarget, defaultValue) {
+      return {
+        distance: null, normalized: 0,
+        target: defaultTarget, value: defaultValue,
+        lastSeen: 0, thumb: null, index: null, score: 0,
+      };
+    }
+
+    function createFlowerModels() {
+      const anchors = [
+        [0.18,0.78,0.75],[0.32,0.66,1.03],[0.47,0.74,0.88],
+        [0.62,0.62,1.16],[0.77,0.74,0.84],[0.56,0.48,0.68],
+      ];
+      return anchors.map(([x,baseY,depth],i) => ({
+        x, baseY, depth,
+        petals: 6 + (i % 4),
+        phase:  Math.random() * TAU,
+        lean:   randomBetween(-0.15, 0.15),
+        bend:   randomBetween(-0.24, 0.24),
+        color:  defaultPalette[i % defaultPalette.length],
+        screenX: 0, screenY: 0, screenDepth: depth, visible: 0,
+      }));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  RESIZE  (original, unchanged)
+    // ═══════════════════════════════════════════════════════════════════════
+    function resize() {
+      flowerDpr = Math.min(window.devicePixelRatio || 1, 2);
+      width  = window.innerWidth;
+      height = window.innerHeight;
+      flowerCanvas.width  = Math.round(width  * flowerDpr);
+      flowerCanvas.height = Math.round(height * flowerDpr);
+      flowerCtx.setTransform(flowerDpr, 0, 0, flowerDpr, 0, 0);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  CAMERA & MEDIAPIPE  (original logic, camera-panel refs removed)
+    // ═══════════════════════════════════════════════════════════════════════
+    async function startCamera() {
+      if (isCameraRunning) return;
+
+      if (!window.isSecureContext &&
+          location.hostname !== "localhost" &&
+          location.hostname !== "127.0.0.1") {
+        cameraStatus.textContent = "Use localhost";
+        trackingStatus.textContent = "Open with http://127.0.0.1";
+        return;
+      }
+      if (!navigator.mediaDevices?.getUserMedia) {
+        cameraStatus.textContent = "Camera API unavailable";
+        return;
+      }
+      if (!window.Hands) {
+        cameraStatus.textContent = "MediaPipe not loaded";
+        return;
+      }
+
+      startBtn.disabled = true;
+      startBtn.textContent = "…";
+      trackingStatus.textContent = "Starting camera";
+
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode:"user", width:{ ideal:640 }, height:{ ideal:480 } },
+          audio: false,
+        });
+
+        video.srcObject = stream;
+        await video.play();
+
+        processingCanvas.width  = video.videoWidth  || 640;
+        processingCanvas.height = video.videoHeight || 480;
+
+        hands = new window.Hands({ locateFile: f => `${MEDIAPIPE_URL}/${f}` });
+        hands.setOptions({
+          maxNumHands: 2, modelComplexity: 1,
+          minDetectionConfidence: 0.68, minTrackingConfidence: 0.68,
+        });
+        hands.onResults(handleHandResults);
+
+        isCameraRunning = true;
+        startBtn.textContent = "LIVE ●";
+        cameraStatus.textContent = "Tracking active";
+        trackingStatus.textContent = "Show your hands";
+        requestAnimationFrame(sendFrameToMediaPipe);
+      } catch (err) {
+        console.error(err);
+        startBtn.disabled = false;
+        startBtn.textContent = "START";
+        cameraStatus.textContent = "Camera blocked";
+        trackingStatus.textContent = "Permission denied";
+      }
+    }
+
+    async function sendFrameToMediaPipe() {
+      if (!isCameraRunning || !hands) return;
+
+      if (!isSendingFrame && video.readyState >= 2) {
+        isSendingFrame = true;
+        const sw = video.videoWidth  || 640;
+        const sh = video.videoHeight || 480;
+        if (processingCanvas.width !== sw || processingCanvas.height !== sh) {
+          processingCanvas.width  = sw;
+          processingCanvas.height = sh;
+        }
+        // Mirror for MediaPipe (original logic)
+        processingCtx.save();
+        processingCtx.clearRect(0, 0, sw, sh);
+        processingCtx.translate(sw, 0);
+        processingCtx.scale(-1, 1);
+        processingCtx.drawImage(video, 0, 0, sw, sh);
+        processingCtx.restore();
+
+        try {
+          await hands.send({ image: processingCanvas });
+        } catch (e) {
+          console.error(e);
+        } finally {
+          isSendingFrame = false;
+        }
+      }
+      requestAnimationFrame(sendFrameToMediaPipe);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  HAND RESULTS  (original gesture mapping — EXACTLY SAME)
+    // ═══════════════════════════════════════════════════════════════════════
+    function handleHandResults(results) {
+      lastHandResults = results;  // cache for visual skeleton
+      const landmarksList  = results.multiHandLandmarks || [];
+      const handednessList = results.multiHandedness   || [];
+      let sawLeft = false, sawRight = false;
+
+      for (let i = 0; i < landmarksList.length; i++) {
+        const landmarks  = landmarksList[i];
+        const label      = getHandLabel(handednessList[i], i);
+        if (label !== "Left" && label !== "Right") continue;
+
+        const hand  = handsState[label];
+        const thumb = landmarks[4];
+        const index = landmarks[8];
+        const dx    = thumb.x - index.x;
+        const dy    = thumb.y - index.y;
+        const distance   = Math.sqrt(dx*dx + dy*dy);
+        const normalized = clamp((distance - PINCH_MIN) / (PINCH_MAX - PINCH_MIN), 0, 1);
+
+        hand.distance   = distance;
+        hand.normalized = normalized;
+        hand.lastSeen   = performance.now();
+        hand.thumb      = { x: thumb.x, y: thumb.y };
+        hand.index      = { x: index.x, y: index.y };
+
+        if (label === "Left") {
+          hand.target = Math.round(mapRange(normalized, 0, 1, 1, MAX_STEMS));
+          sawLeft = true;
+        } else {
+          hand.target = mapRange(normalized, 0, 1, 0.2, 1.5);
+          sawRight = true;
+        }
+      }
+
+      if (sawLeft || sawRight) {
+        trackingStatus.textContent = [
+          sawLeft  ? "← stems" : "← missing",
+          sawRight ? "→ bloom"  : "→ missing",
+        ].join(" | ");
+      } else {
+        trackingStatus.textContent = "No hands detected";
+      }
+    }
+
+    function getHandLabel(handedness, index) {
+      if (!handedness) return index === 0 ? "Left" : "Right";
+      if (typeof handedness.label === "string") return handedness.label;
+      const cat = handedness[0] || handedness.classification?.[0] || handedness.categories?.[0];
+      return cat?.label || cat?.categoryName || (index === 0 ? "Left" : "Right");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  GESTURE VALUE UPDATE  (original logic — EXACTLY SAME)
+    // ═══════════════════════════════════════════════════════════════════════
+    function updateGestureValues() {
+      const now   = performance.now();
+      const left  = handsState.Left;
+      const right = handsState.Right;
+
+      if (now - left.lastSeen > HAND_LOSS_AFTER_MS) {
+        left.target   = lerp(left.target, 1, 0.035);
+        left.distance = left.thumb = left.index = null;
+      }
+      if (now - right.lastSeen > HAND_LOSS_AFTER_MS) {
+        right.target   = lerp(right.target, 0.2, 0.035);
+        right.distance = right.thumb = right.index = null;
+      }
+
+      left.value  = lerp(left.value,  left.target,  0.11);
+      right.value = lerp(right.value, right.target, 0.11);
+
+      displayedStemCount = clamp(left.value,  1,   MAX_STEMS);
+      displayedBloom     = clamp(right.value, 0.2, 1.5);
+      cameraZoom         = lerp(cameraZoom, 1.012 + displayedBloom * 0.02, 0.008);
+
+      leftDistanceText.textContent  = left.distance  == null ? "--" : `${left.distance.toFixed(3)} / ${left.normalized.toFixed(2)}`;
+      rightDistanceText.textContent = right.distance == null ? "--" : `${right.distance.toFixed(3)} / ${right.normalized.toFixed(2)}`;
+      leftStemsText.textContent  = `${Math.round(displayedStemCount)} (${displayedStemCount.toFixed(2)})`;
+      rightBloomText.textContent = displayedBloom.toFixed(2);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  RENDER LOOP  (original structure)
+    // ═══════════════════════════════════════════════════════════════════════
+    function render(time) {
+      updateGestureValues();
+      drawFlowers(time * 0.001);
+      requestAnimationFrame(render);
+    }
+
+    function drawFlowers(elapsed) {
+      flowerCtx.clearRect(0, 0, width, height);
+
+      // Subtle scene overlay (replaces solid dark background — camera shows through)
+      drawSceneOverlay(elapsed);
+
+      const bloomIncrease = Math.max(0, displayedBloom - lastParticleBloom);
+      if (bloomIncrease > 0.004) emitParticles(bloomIncrease);
+      lastParticleBloom = displayedBloom;
+
+      flowerCtx.save();
+      flowerCtx.translate(width * 0.5, height * 0.57);
+      flowerCtx.scale(cameraZoom, cameraZoom);
+      flowerCtx.translate(-width * 0.5, -height * 0.57);
+
+      for (let i = 0; i < flowers.length; i++) {
+        const presence = clamp(displayedStemCount - i, 0, 1);
+        if (presence > 0.01) drawFlower(flowers[i], i, presence, elapsed);
+      }
+
+      drawParticles(elapsed);
+      flowerCtx.restore();
+      drawHandSkeletons();   // ← visual hand skeleton overlay
+      drawVignette();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  SCENE OVERLAY  (NEW — replaces solid drawBackground)
+    //  Transparent canvas: camera shows through. Only adds depth cues.
+    // ═══════════════════════════════════════════════════════════════════════
+    function drawSceneOverlay(elapsed) {
+      // Ground darkening — helps stems root visually
+      const ground = flowerCtx.createLinearGradient(0, height * 0.55, 0, height);
+      ground.addColorStop(0, "rgba(0,0,0,0)");
+      ground.addColorStop(1, "rgba(3,2,1,0.62)");
+      flowerCtx.fillStyle = ground;
+      flowerCtx.fillRect(0, 0, width, height);
+
+      // Subtle animated glow tinted by flower type
+      const glowX   = width  * (0.5 + Math.sin(elapsed * 0.06) * 0.025);
+      const glowY   = height * 0.38;
+      const glowRGB = flowerType === "rose"      ? "255,77,109"
+                    : flowerType === "sunflower"  ? "255,209,102"
+                    :                              "255,213,126";
+
+      const halo = flowerCtx.createRadialGradient(glowX, glowY, 0, glowX, glowY, Math.max(width, height) * 0.62);
+      halo.addColorStop(0,    `rgba(${glowRGB},0.08)`);
+      halo.addColorStop(0.44, `rgba(${glowRGB},0.03)`);
+      halo.addColorStop(1,    "rgba(0,0,0,0)");
+      flowerCtx.fillStyle = halo;
+      flowerCtx.fillRect(0, 0, width, height);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  FLOWER DRAW DISPATCHER  (stem preserved exactly; head switches by type)
+    // ═══════════════════════════════════════════════════════════════════════
+    function drawFlower(flower, index, presence, elapsed) {
+      const scale      = Math.min(width, height) * 0.148 * flower.depth;
+      const baseX      = width  * flower.x;
+      const baseY      = height * flower.baseY;
+      const stemGrow   = easeOutCubic(presence);
+      const bloomScale = displayedBloom;
+      const petalBloom = easeOutCubic(clamp((bloomScale - 0.2) / 1.3, 0, 1));
+      const breathing  = 1 + Math.sin(elapsed * 1.18 + flower.phase) * 0.04;
+      const sway       = Math.sin(elapsed * 0.82 + flower.phase) * scale * 0.08;
+      const stemLength = scale * (1.22 + (flower.depth - 0.7) * 0.58);
+      const headX      = baseX + sway + flower.lean * scale * stemGrow;
+      const headY      = baseY - stemLength * stemGrow;
+      const controlX   = baseX + (headX - baseX) * 0.42 + flower.bend * scale + sway * 0.36;
+      const controlY   = baseY - stemLength * 0.54 * stemGrow;
+
+      // ── STEM (original — completely unchanged) ──────────────────────────
+      flowerCtx.save();
+      flowerCtx.globalAlpha  = (0.48 + flower.depth * 0.3) * presence;
+      flowerCtx.filter       = flower.depth < 0.78 ? "blur(1.3px)" : "none";
+      flowerCtx.lineCap      = "round";
+      flowerCtx.lineWidth    = Math.max(1.15, scale * 0.018);
+      flowerCtx.shadowBlur   = 10 + 14 * stemGrow;
+      flowerCtx.shadowColor  = "rgba(255,245,225,0.22)";
+
+      const stemGrad = flowerCtx.createLinearGradient(baseX, baseY, headX, headY);
+      stemGrad.addColorStop(0,    "rgba(244,162,97,0.1)");
+      stemGrad.addColorStop(0.55, "rgba(255,209,102,0.4)");
+      stemGrad.addColorStop(1,    "rgba(255,245,225,0.56)");
+      flowerCtx.strokeStyle = stemGrad;
+      flowerCtx.beginPath();
+      flowerCtx.moveTo(baseX, baseY);
+      flowerCtx.quadraticCurveTo(controlX, controlY, headX, headY);
+      flowerCtx.stroke();
+      flowerCtx.restore();
+
+      if (stemGrow <= 0.03) {
+        flower.screenX = headX; flower.screenY = headY;
+        flower.screenDepth = flower.depth; flower.visible = presence;
+        return;
+      }
+
+      // ── FLOWER HEAD ─────────────────────────────────────────────────────
+      const flowerRadius = scale * (0.24 + bloomScale * 0.42) * breathing;
+
+      flowerCtx.save();
+      flowerCtx.translate(headX, headY);
+      flowerCtx.globalAlpha = (0.54 + petalBloom * 0.3) * presence;
+      flowerCtx.filter = flower.depth < 0.78 ? "blur(0.85px)" : "none";
+
+      switch (flowerType) {
+        case "rose":      drawRoseHead(flower, index, flowerRadius, petalBloom, elapsed); break;
+        case "sunflower": drawSunflowerHead(flower, index, flowerRadius, petalBloom, elapsed); break;
+        default:          drawDefaultHead(flower, index, flowerRadius, petalBloom, elapsed); break;
+      }
+
+      flowerCtx.restore();
+
+      flower.screenX     = headX;
+      flower.screenY     = headY;
+      flower.screenDepth = flower.depth;
+      flower.visible     = presence;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  DEFAULT HEAD  (original — exactly preserved)
+    // ═══════════════════════════════════════════════════════════════════════
+    function drawDefaultHead(flower, index, flowerRadius, petalBloom, elapsed) {
+      const petalLength = flowerRadius * 1.08;
+      const petalWidth  = flowerRadius * 0.43;
+
+      flowerCtx.rotate(Math.sin(elapsed * 0.34 + flower.phase) * 0.05);
+      flowerCtx.shadowBlur  = 15 + 15 * petalBloom;
+      flowerCtx.shadowColor = flower.color.glow;
+
+      for (let p = 0; p < flower.petals; p++) {
+        const theta = (p / flower.petals) * TAU + Math.sin(elapsed * 0.26 + flower.phase) * 0.035;
+        const pulse = (0.55 + petalBloom * 0.58) * (0.96 + Math.sin(elapsed * 0.9 + p + index) * 0.04);
+        drawDefaultPetal(theta, petalLength * pulse, petalWidth * pulse, flower.color);
+      }
+
+      // Core glow
+      flowerCtx.shadowBlur  = 16 + 12 * petalBloom;
+      flowerCtx.shadowColor = "rgba(255,245,225,0.88)";
+      const core = flowerCtx.createRadialGradient(0, 0, 1, 0, 0, flowerRadius * 0.23);
+      core.addColorStop(0,    "#FFF5E1");
+      core.addColorStop(0.46, "#FFD166");
+      core.addColorStop(1,    "rgba(244,162,97,0.12)");
+      flowerCtx.fillStyle = core;
+      flowerCtx.beginPath();
+      flowerCtx.arc(0, 0, Math.max(3, flowerRadius * 0.17), 0, TAU);
+      flowerCtx.fill();
+    }
+
+    function drawDefaultPetal(theta, length, petalWidth, color) {
+      flowerCtx.save();
+      flowerCtx.rotate(theta);
+      flowerCtx.translate(length * 0.42, 0);
+      flowerCtx.scale(1, 0.82);
+      const g = flowerCtx.createRadialGradient(-length * 0.18, 0, 1, length * 0.2, 0, length * 0.96);
+      g.addColorStop(0,    hexToRgba(color.inner, 0.86));
+      g.addColorStop(0.38, hexToRgba(color.mid,   0.80));
+      g.addColorStop(1,    hexToRgba(color.outer,  0.18));
+      flowerCtx.fillStyle = g;
+      flowerCtx.beginPath();
+      flowerCtx.ellipse(0, 0, Math.max(1, length * 0.5), Math.max(1, petalWidth), 0, 0, TAU);
+      flowerCtx.fill();
+      flowerCtx.restore();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  ROSE HEAD  (NEW)
+    //  Layered spiral petals, deep pink/red, golden-ratio spiral rotation,
+    //  bloom controls layer count + petal size
+    // ═══════════════════════════════════════════════════════════════════════
+    function drawRoseHead(flower, index, flowerRadius, petalBloom, elapsed) {
+      const numLayers = Math.floor(2 + petalBloom * 7); // 2–9 layers
+
+      flowerCtx.shadowBlur  = 24 + 14 * petalBloom;
+      flowerCtx.shadowColor = "rgba(255,60,100,0.60)";
+
+      // Draw outer → inner so inner petals are on top
+      for (let layer = numLayers - 1; layer >= 0; layer--) {
+        const t           = numLayers > 1 ? layer / (numLayers - 1) : 0; // 0=inner, 1=outer
+        const numPetals   = 5 + Math.floor(t * 3);                        // 5–8
+        const layerRadius = flowerRadius * (0.18 + t * 0.82);
+        // Golden-ratio spiral: each layer rotated by φ·π so petals never stack perfectly
+        const spiralRot   = layer * (Math.PI * 0.618)
+                          + Math.sin(elapsed * 0.14 + flower.phase) * 0.06;
+        const alpha       = 0.58 + t * 0.38;
+
+        flowerCtx.save();
+        flowerCtx.rotate(spiralRot);
+
+        for (let p = 0; p < numPetals; p++) {
+          const theta    = (p / numPetals) * TAU;
+          const petalLen = layerRadius * (0.82 + t * 0.38);
+          const petalW   = layerRadius * (0.28 + t * 0.20);
+
+          flowerCtx.save();
+          flowerCtx.rotate(theta);
+          flowerCtx.translate(petalLen * 0.26, 0);
+
+          // Deeper red at centre, soft pink toward tips
+          const innerHex = t < 0.42 ? "#ae1f3a" : "#e8244f";
+          const outerHex = t > 0.58 ? "#ffb3c6" : "#ff8fa3";
+
+          const g = flowerCtx.createRadialGradient(-petalLen * 0.08, 0, 1, petalLen * 0.28, 0, petalLen);
+          g.addColorStop(0,    hexToRgba(innerHex, alpha));
+          g.addColorStop(0.40, hexToRgba("#ff4d6d", alpha * 0.90));
+          g.addColorStop(1,    hexToRgba(outerHex,  alpha * 0.12));
+          flowerCtx.fillStyle = g;
+
+          // Slightly cupped (flatter in Y) — gives inward-curl feeling
+          flowerCtx.save();
+          flowerCtx.scale(1, 0.70 + t * 0.20);
+          flowerCtx.beginPath();
+          flowerCtx.ellipse(0, 0, Math.max(1, petalLen * 0.54), Math.max(1, petalW), 0, 0, TAU);
+          flowerCtx.fill();
+          flowerCtx.restore();
+
+          flowerCtx.restore();
+        }
+        flowerCtx.restore();
+      }
+
+      // Centre bud — tight warm glow
+      flowerCtx.shadowBlur  = 18;
+      flowerCtx.shadowColor = "rgba(255,100,130,0.95)";
+      const bud = flowerCtx.createRadialGradient(0, 0, 0, 0, 0, flowerRadius * 0.21);
+      bud.addColorStop(0,    "#ffd6e0");
+      bud.addColorStop(0.30, "#ff4d6d");
+      bud.addColorStop(0.72, "#ae1f3a");
+      bud.addColorStop(1,    "rgba(80,8,22,0)");
+      flowerCtx.fillStyle = bud;
+      flowerCtx.beginPath();
+      flowerCtx.arc(0, 0, Math.max(3, flowerRadius * 0.19), 0, TAU);
+      flowerCtx.fill();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  SUNFLOWER HEAD  (NEW)
+    //  Dark brown disc, 12–16 yellow petals, continuous rotation,
+    //  bloom controls petal length + count
+    // ═══════════════════════════════════════════════════════════════════════
+    function drawSunflowerHead(flower, index, flowerRadius, petalBloom, elapsed) {
+      const numPetals = Math.floor(12 + petalBloom * 4);   // 12–16
+      const petalLen  = flowerRadius * (1.08 + petalBloom * 0.58);
+      const petalW    = flowerRadius * 0.25;
+      const rotation  = elapsed * 0.20 + flower.phase;     // continuous slow spin
+
+      // ── Outer yellow petals ───────────────────────────────────────────
+      flowerCtx.save();
+      flowerCtx.rotate(rotation);
+      flowerCtx.shadowBlur  = 22 + 16 * petalBloom;
+      flowerCtx.shadowColor = "rgba(255,220,50,0.72)";
+
+      for (let p = 0; p < numPetals; p++) {
+        const theta = (p / numPetals) * TAU;
+        flowerCtx.save();
+        flowerCtx.rotate(theta);
+        flowerCtx.translate(petalLen * 0.40, 0);
+
+        const g = flowerCtx.createLinearGradient(-petalLen * 0.38, 0, petalLen * 0.62, 0);
+        g.addColorStop(0,    "rgba(255,232,60,0.94)");
+        g.addColorStop(0.32, "rgba(255,209,102,0.90)");
+        g.addColorStop(0.70, "rgba(244,168,55,0.54)");
+        g.addColorStop(1,    "rgba(210,130,20,0.08)");
+        flowerCtx.fillStyle = g;
+
+        flowerCtx.save();
+        flowerCtx.scale(1, 0.62);
+        flowerCtx.beginPath();
+        flowerCtx.ellipse(0, 0, Math.max(1, petalLen * 0.52), Math.max(1, petalW), 0, 0, TAU);
+        flowerCtx.fill();
+        flowerCtx.restore();
+        flowerCtx.restore();
+      }
+      flowerCtx.restore();
+
+      // ── Inner ring (counter-rotates slightly) — depth illusion ────────
+      flowerCtx.save();
+      flowerCtx.rotate(-rotation * 0.42);
+      flowerCtx.globalAlpha = 0.38;
+      for (let p = 0; p < numPetals; p++) {
+        const theta = ((p + 0.5) / numPetals) * TAU;
+        flowerCtx.save();
+        flowerCtx.rotate(theta);
+        flowerCtx.translate(petalLen * 0.28, 0);
+        flowerCtx.fillStyle = "rgba(244,162,55,0.65)";
+        flowerCtx.save();
+        flowerCtx.scale(1, 0.55);
+        flowerCtx.beginPath();
+        flowerCtx.ellipse(0, 0, Math.max(1, petalLen * 0.30), Math.max(1, petalW * 0.68), 0, 0, TAU);
+        flowerCtx.fill();
+        flowerCtx.restore();
+        flowerCtx.restore();
+      }
+      flowerCtx.restore();
+
+      // ── Dark centre disc ──────────────────────────────────────────────
+      const cR = flowerRadius * 0.36;
+      flowerCtx.shadowBlur  = 12;
+      flowerCtx.shadowColor = "rgba(0,0,0,0.75)";
+
+      const discGrad = flowerCtx.createRadialGradient(-cR * 0.12, -cR * 0.10, 0, 0, 0, cR);
+      discGrad.addColorStop(0,    "#9b6e42");
+      discGrad.addColorStop(0.38, "#5a3e2b");
+      discGrad.addColorStop(0.80, "#3d2a1a");
+      discGrad.addColorStop(1,    "#1e1008");
+      flowerCtx.fillStyle = discGrad;
+      flowerCtx.beginPath();
+      flowerCtx.arc(0, 0, Math.max(4, cR), 0, TAU);
+      flowerCtx.fill();
+
+      // Disc floret pattern — concentric rings of tiny dots
+      const floretCount = Math.floor(10 + petalBloom * 6);
+      for (let d = 0; d < floretCount; d++) {
+        const angle = (d / floretCount) * TAU + elapsed * 0.16;
+        const ring  = d % 3;
+        const dist  = cR * (0.20 + ring * 0.22);
+        const col   = ring === 0 ? "110,72,40" : ring === 1 ? "75,50,28" : "55,36,18";
+        flowerCtx.shadowBlur = 0;
+        flowerCtx.fillStyle  = `rgba(${col},0.88)`;
+        flowerCtx.beginPath();
+        flowerCtx.arc(
+          Math.cos(angle) * dist,
+          Math.sin(angle) * dist,
+          Math.max(1, cR * 0.08), 0, TAU
+        );
+        flowerCtx.fill();
+      }
+
+      // Centre highlight
+      const highlight = flowerCtx.createRadialGradient(-cR * 0.15, -cR * 0.15, 0, 0, 0, cR * 0.45);
+      highlight.addColorStop(0, "rgba(180,120,65,0.38)");
+      highlight.addColorStop(1, "rgba(0,0,0,0)");
+      flowerCtx.fillStyle = highlight;
+      flowerCtx.beginPath();
+      flowerCtx.arc(0, 0, cR, 0, TAU);
+      flowerCtx.fill();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  PARTICLES  (original logic + type-aware colours)
+    // ═══════════════════════════════════════════════════════════════════════
+    function emitParticles(amount) {
+      const visible = flowers.filter(f => f.screenX && f.visible > 0.3);
+      const count   = Math.min(10, Math.max(1, Math.round(amount * 62)));
+
+      for (let i = 0; i < count && visible.length > 0; i++) {
+        const flower  = visible[Math.floor(Math.random() * visible.length)];
+        const variant = Math.random() < 0.5 ? 0 : 1;
+        particles.push({
+          x:     flower.screenX + randomBetween(-5, 5),
+          y:     flower.screenY + randomBetween(-4, 4),
+          vx:    randomBetween(-0.22, 0.22),
+          vy:    randomBetween(-0.74, -0.28),
+          size:  randomBetween(1.2, 2.8) * flower.screenDepth,
+          life:  1,
+          color: particleColor(variant),
+        });
+      }
+    }
+
+    function drawParticles(elapsed) {
+      for (let i = particles.length - 1; i >= 0; i--) {
+        const p = particles[i];
+        p.x   += p.vx + Math.sin(elapsed + p.y * 0.01) * 0.09;
+        p.y   += p.vy;
+        p.life -= 0.013;
+
+        if (p.life <= 0 || p.y < -24 || p.x < -24 || p.x > width + 24) {
+          particles.splice(i, 1);
+          continue;
+        }
+
+        flowerCtx.save();
+        flowerCtx.globalAlpha = p.life * 0.60;
+        flowerCtx.shadowBlur  = 20;
+        flowerCtx.shadowColor = `rgba(${p.color},${p.life})`;
+        flowerCtx.fillStyle   = `rgba(${p.color},${p.life})`;
+        flowerCtx.beginPath();
+        flowerCtx.arc(p.x, p.y, p.size, 0, TAU);
+        flowerCtx.fill();
+        flowerCtx.restore();
+      }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  HAND SKELETON OVERLAY  (NEW — visual tracking like reference image)
+    //  Left hand  → warm gold/orange  (#FFB432 tones)
+    //  Right hand → hot pink/magenta  (#FF64B4 tones)
+    //  Draws: connection lines, landmark dots, fingertip circles, pinch line,
+    //         hand label + gesture value near wrist
+    // ═══════════════════════════════════════════════════════════════════════
+    function drawHandSkeletons() {
+      if (!lastHandResults) return;
+      const landmarksList  = lastHandResults.multiHandLandmarks || [];
+      const handednessList = lastHandResults.multiHandedness    || [];
+      if (!landmarksList.length) return;
+
+      // Fingertip indices: thumb=4, index=8, middle=12, ring=16, pinky=20
+      const FINGERTIPS   = new Set([4, 8, 12, 16, 20]);
+      // Palm knuckle indices (slightly larger dots)
+      const KNUCKLES     = new Set([0, 5, 9, 13, 17]);
+
+      for (let h = 0; h < landmarksList.length; h++) {
+        const landmarks = landmarksList[h];
+        const label     = getHandLabel(handednessList[h], h);
+        const isLeft    = label === "Left";
+
+        // ── Palette ──────────────────────────────────────────────────────
+        const lineColor  = isLeft ? "rgba(255,180,50,0.80)"  : "rgba(255,100,185,0.80)";
+        const glowColor  = isLeft ? "rgba(255,200,80,0.55)"  : "rgba(255,80,170,0.55)";
+        const dotColor   = isLeft ? "#FFD166"                : "#FF8FA3";
+        const tipColor   = "#FFFFFF";
+        const hand       = handsState[label];
+
+        // ── Connection lines ─────────────────────────────────────────────
+        flowerCtx.save();
+        flowerCtx.strokeStyle = lineColor;
+        flowerCtx.lineWidth   = 2.2;
+        flowerCtx.lineCap     = "round";
+        flowerCtx.lineJoin    = "round";
+        flowerCtx.shadowBlur  = 10;
+        flowerCtx.shadowColor = glowColor;
+
+        for (const [a, b] of handConnections) {
+          const lA = landmarks[a];
+          const lB = landmarks[b];
+          flowerCtx.beginPath();
+          flowerCtx.moveTo(lA.x * width, lA.y * height);
+          flowerCtx.lineTo(lB.x * width, lB.y * height);
+          flowerCtx.stroke();
+        }
+        flowerCtx.restore();
+
+        // ── Landmark dots ────────────────────────────────────────────────
+        for (let i = 0; i < landmarks.length; i++) {
+          const lm = landmarks[i];
+          const sx = lm.x * width;
+          const sy = lm.y * height;
+
+          flowerCtx.save();
+          if (FINGERTIPS.has(i)) {
+            // Fingertips: white outer ring + colored fill
+            flowerCtx.shadowBlur  = 14;
+            flowerCtx.shadowColor = glowColor;
+            flowerCtx.fillStyle   = tipColor;
+            flowerCtx.beginPath();
+            flowerCtx.arc(sx, sy, 6, 0, TAU);
+            flowerCtx.fill();
+            flowerCtx.fillStyle = dotColor;
+            flowerCtx.beginPath();
+            flowerCtx.arc(sx, sy, 4, 0, TAU);
+            flowerCtx.fill();
+          } else if (KNUCKLES.has(i)) {
+            // Palm knuckles: medium colored dot
+            flowerCtx.shadowBlur  = 8;
+            flowerCtx.shadowColor = glowColor;
+            flowerCtx.fillStyle   = dotColor;
+            flowerCtx.beginPath();
+            flowerCtx.arc(sx, sy, 4.5, 0, TAU);
+            flowerCtx.fill();
+          } else {
+            // Regular joints: small dot
+            flowerCtx.shadowBlur  = 5;
+            flowerCtx.shadowColor = glowColor;
+            flowerCtx.fillStyle   = dotColor;
+            flowerCtx.globalAlpha = 0.75;
+            flowerCtx.beginPath();
+            flowerCtx.arc(sx, sy, 3, 0, TAU);
+            flowerCtx.fill();
+          }
+          flowerCtx.restore();
+        }
+
+        // ── Pinch indicator: line between thumb-tip (4) and index-tip (8) ─
+        if (hand && hand.thumb && hand.index) {
+          const tx = hand.thumb.x * width;
+          const ty = hand.thumb.y * height;
+          const ix = hand.index.x * width;
+          const iy = hand.index.y * height;
+          const pinchT = 1 - clamp(hand.normalized, 0, 1); // 1=closed, 0=open
+
+          flowerCtx.save();
+          flowerCtx.setLineDash([4, 4]);
+          flowerCtx.lineWidth   = 1.5;
+          flowerCtx.strokeStyle = isLeft
+            ? `rgba(255,220,80,${0.35 + pinchT * 0.55})`
+            : `rgba(255,120,200,${0.35 + pinchT * 0.55})`;
+          flowerCtx.shadowBlur  = 8 + pinchT * 12;
+          flowerCtx.shadowColor = glowColor;
+          flowerCtx.beginPath();
+          flowerCtx.moveTo(tx, ty);
+          flowerCtx.lineTo(ix, iy);
+          flowerCtx.stroke();
+          flowerCtx.restore();
+
+          // Small glow pulse at midpoint when nearly pinched
+          if (pinchT > 0.72) {
+            const mx = (tx + ix) * 0.5;
+            const my = (ty + iy) * 0.5;
+            const pulse = (pinchT - 0.72) / 0.28;
+            flowerCtx.save();
+            flowerCtx.globalAlpha = pulse * 0.75;
+            flowerCtx.shadowBlur  = 20;
+            flowerCtx.shadowColor = glowColor;
+            flowerCtx.fillStyle   = tipColor;
+            flowerCtx.beginPath();
+            flowerCtx.arc(mx, my, 3 + pulse * 4, 0, TAU);
+            flowerCtx.fill();
+            flowerCtx.restore();
+          }
+        }
+
+        // ── Wrist label: hand name + gesture value ───────────────────────
+        const wrist = landmarks[0];
+        const wx = wrist.x * width;
+        const wy = wrist.y * height + 22;
+        const gestureVal = isLeft
+          ? `${Math.round(displayedStemCount)} stems`
+          : `bloom ${displayedBloom.toFixed(2)}`;
+        const dist = hand?.distance != null ? hand.distance.toFixed(3) : "--";
+        const conf = handednessList[h]?.score ??
+                     handednessList[h]?.[0]?.score ??
+                     handednessList[h]?.classification?.[0]?.score ??
+                     handednessList[h]?.categories?.[0]?.score ?? null;
+        const confStr = conf != null ? ` (${conf.toFixed(2)})` : "";
+        const labelText = `${label}: ${dist}${confStr}`;
+
+        flowerCtx.save();
+        flowerCtx.font         = "bold 11px 'DM Sans', ui-sans-serif, sans-serif";
+        flowerCtx.textAlign    = "center";
+        flowerCtx.shadowBlur   = 8;
+        flowerCtx.shadowColor  = "rgba(0,0,0,0.9)";
+        // Gesture value line
+        flowerCtx.fillStyle    = dotColor;
+        flowerCtx.fillText(gestureVal, wx, wy);
+        // Distance + confidence line
+        flowerCtx.font         = "10px 'DM Sans', ui-sans-serif, sans-serif";
+        flowerCtx.fillStyle    = "rgba(255,255,255,0.60)";
+        flowerCtx.fillText(labelText, wx, wy + 14);
+        flowerCtx.restore();
+      }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  VIGNETTE  (original — unchanged)
+    // ═══════════════════════════════════════════════════════════════════════
+    function drawVignette() {
+      const v = flowerCtx.createRadialGradient(
+        width * 0.5, height * 0.5, Math.min(width, height) * 0.22,
+        width * 0.5, height * 0.5, Math.max(width, height) * 0.78,
+      );
+      v.addColorStop(0,    "rgba(0,0,0,0)");
+      v.addColorStop(0.66, "rgba(5,3,2,0.10)");
+      v.addColorStop(1,    "rgba(0,0,0,0.68)");
+      flowerCtx.fillStyle = v;
+      flowerCtx.fillRect(0, 0, width, height);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  FLOWER TYPE SWITCHER
+    // ═══════════════════════════════════════════════════════════════════════
+    function setFlowerType(type) {
+      flowerType = type;
+      typeBtns.forEach(b => b.classList.toggle("active", b.dataset.type === type));
+      particles.length = 0; // flush old-colour particles
+    }
+
+    typeBtns.forEach(btn =>
+      btn.addEventListener("click", () => setFlowerType(btn.dataset.type))
+    );
+
+    // Keyboard shortcuts: D / R / S
+    window.addEventListener("keydown", e => {
+      if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
+      if (e.key === "d" || e.key === "D") setFlowerType("default");
+      if (e.key === "r" || e.key === "R") setFlowerType("rose");
+      if (e.key === "s" || e.key === "S") setFlowerType("sunflower");
+    });
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  BOOTSTRAP
+    // ═══════════════════════════════════════════════════════════════════════
+    window.addEventListener("resize", resize);
+    startBtn.addEventListener("click", startCamera);
+    resize();
+    requestAnimationFrame(render);
+  </script>
+</body>
+</html>
